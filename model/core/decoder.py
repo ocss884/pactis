@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -98,38 +99,87 @@ class AttentionalCopula(nn.Module):
         self.feed_forward_layer_norms = nn.ModuleList(
             [nn.LayerNorm(self.attn_heads * self.attn_dim) for _ in range(self.attn_layers)]
         )
-    def loss(self, encoded, true_u, mask):
+    def loss(self, encoded, true_u, mask, device):
         r"""
         Args:
         -----
         encoded: [batch, series, time_steps, input_dim]
         true_u: [batch, series, time_steps]
-        mask: [batch, time_steps]
+        mask: [time_steps]
         """
-        num_batches = encoded.shape[0]
+        num_batch = encoded.shape[0]
         num_series = encoded.shape[1]
         num_time_steps = encoded.shape[2]
-        input_dim = encoded.shape[3]
-
-        true_pred_u = true_u[:, :, mask.bool()]
+        num_variable = num_series * num_time_steps
         
-        # [batch, series, time_steps, input_dim+1]
-        merged_input = torch.cat([encoded, true_u[:, :, :, None]], dim=-1)
+        time_horizon = TimeSeriesOM(num_series, mask)
+        mid_points_map = {}
+        index_mask = {}
 
-        # [[batch, attn_heads, series, time_steps, attn_dim]*attn_layers]
-        keys = [
-            torch.cat([rearrange(mlp(merged_input), "b s t d -> b 1 s t d") for mlp in self.key_creators[layer]], axis=1)
+        while time_horizon.has_missing_points():
+            current_mid_points_map, current_index_mask = time_horizon.next_to_fill()
+            mid_points_map, index_mask= {**mid_points_map, **current_mid_points_map}, {**index_mask, **current_index_mask}
+        num_pred_points = len(mid_points_map)
+        
+        encoded  = torch.clone(encoded).reshape(num_batch, num_variable, self.input_dim)
+        true_u = torch.clone(true_u).reshape(num_batch, num_variable, 1)
+        merged_input = torch.cat([encoded, true_u], dim=-1)
+
+        # [[batch, attn_heads, variable, attn_dim]*attn_layers] for history and prediction variable, concat along the attn_heads dimension
+        keys_all = [
+            torch.cat([mlp(merged_input)[:, None, :, :] for mlp in self.key_creators[layer]], axis=1)
             for layer in range(self.attn_layers)
         ]
-        values = [
-            torch.cat([rearrange(mlp(merged_input), "b s t d -> b 1 s t d") for mlp in self.value_creators[layer]], axis=1)
+        values_all = [
+            torch.cat([mlp(merged_input)[:, None, :, :] for mlp in self.value_creators[layer]], axis=1)
             for layer in range(self.attn_layers)
         ]
-        product_mask = torch.ones(
-            (num_batches, self.attn_heads, num_series, num_time_steps)
-        )
+        pred_points = tuple(mid_points_map.keys())
+        current_encoded = encoded[:, pred_points, :].reshape(num_batch, num_pred_points, self.input_dim)
+        # [batch, attn_heads, num_pred_points, attn_dim]
+        att_value = self.dimension_shift(current_encoded)
 
-        return 
+        for layer in range(self.attn_layers):
+            # att_value: [batch, num_pred_points, attn_heads, attn_dim]
+            att_value_heads = att_value.reshape(
+                num_batch, num_pred_points, self.attn_heads, self.attn_dim
+            )
+            # [batch, attn_heads, variable, attn_dim]
+            keys = keys_all[layer]
+            values = values_all[layer]
+
+            # [batch, num_pred_points, attn_head, 2 * series, attn_dim]
+            neighbor_keys = torch.empty((num_batch, num_pred_points, self.attn_heads, 2 * num_series, self.attn_dim), device=device)
+            neighbor_values = torch.empty((num_batch, num_pred_points, self.attn_heads, 2 * num_series, self.attn_dim), device=device)
+            for j, current_point in enumerate(mid_points_map):
+                # print(index_mask[index_mask])
+                neighbor_index = mid_points_map[current_point]
+                padding_mask = rearrange(index_mask[current_point], "n -> 1 1 n 1").to(device)
+                neighbor_keys[:, j, :, :, :] = keys[:, :, neighbor_index, :] * padding_mask
+                neighbor_values[:, j, :, :, :] = values[:, :, neighbor_index, :] * padding_mask
+
+            product_hist = torch.einsum("bphd, bphnd -> bphn", att_value_heads, neighbor_keys)
+            product_hist = self.attn_dim ** (-0.5) * product_hist
+
+            weights = F.softmax(product_hist, dim=-1)
+            att = torch.einsum("bphn, bphnd -> bphd", weights, neighbor_values)
+            att = rearrange(att, "batch pred head dim -> batch pred (head dim)")
+            att = self.attention_dropouts[layer](att)
+            # residual
+            att_value = att_value + att
+
+            # pre dropout
+            att_value = self.attention_layer_norms[layer](att_value)
+            att_feed_forward = self.feed_forwards[layer](att_value)
+            # residual
+            att_value = att_value + att_feed_forward
+            att_value = self.feed_forward_layer_norms[layer](att_value)
+        logits = self.dist_extractors(att_value)
+        target = torch.clip(torch.floor(true_u * self.resolution).long(), min=0, max=self.resolution - 1)
+        logprob = np.log(self.resolution) + F.log_softmax(logits, dim=2)
+        target = target[:, pred_points, :]
+        logprob = torch.gather(logprob, 2, target)
+        return -logprob
     
 
     def sample_once(self, hist_encoded, true_u, pred_encoded):
@@ -150,11 +200,11 @@ class AttentionalCopula(nn.Module):
 
         merged_input = torch.cat([hist_encoded, true_u[:, :, :, None]], dim=-1)
         keys_all = [
-            torch.cat([mlp(merged_input)[:, :, :, None, :] for mlp in self.key_creators[layer]], axis=3)
+            torch.cat([mlp(merged_input)[:, None, :, :, :] for mlp in self.key_creators[layer]], axis=3)
             for layer in range(self.attn_layers)
         ]
         values_all = [
-            torch.cat([mlp(merged_input)[:, :, :, None, :] for mlp in self.value_creators[layer]], axis=3)
+            torch.cat([mlp(merged_input)[:, None, :, :, :] for mlp in self.value_creators[layer]], axis=3)
             for layer in range(self.attn_layers)
         ]
         for i in range(num_series):
@@ -166,100 +216,103 @@ class AttentionalCopula(nn.Module):
             Tensor containing embedding of history data points and data points to be forcasted
         true_u: [batch, series, time_steps]
             0 if the data point to be forcasted
-        mask: [batch_size, time_steps]
+        mask: [time_steps]
             1 for history, 0 for prediction
         """
-        time_horizon = TimeSeriesOM(mask)
         
-        num_batches = encoded.shape[0]
+        num_batch = encoded.shape[0]
         num_series = encoded.shape[1]
+        num_time_steps = encoded.shape[2]
+        num_variable = num_series * num_time_steps
 
-        # [batch, series, time_steps, input_dim + 1]
-        merged_input = torch.cat([encoded, true_u[:, :, :, None]], dim=-1)
+        time_horizon = TimeSeriesOM(num_series, mask)
+        encoded = torch.clone(encoded.reshape(num_batch, num_variable, self.input_dim)).to(device)
+        true_u = torch.clone(true_u.reshape(num_batch, num_variable)).to(device)
 
-        # [[batch, series, time_steps, attn_heads, attn_dim]*attn_layers] for history and prediction time steps, concat along the attn_heads dimension
+        # [batch, variable, input_dim + 1]
+        merged_input = torch.cat([encoded, true_u[:, :, None]], dim=-1)
+
+        # [[batch, attn_heads, variable, attn_dim]*attn_layers] for history and prediction variable, concat along the attn_heads dimension
         keys_all = [
-            torch.cat([mlp(merged_input)[:, :, :, None, :] for mlp in self.key_creators[layer]], axis=3)
+            torch.cat([mlp(merged_input)[:, None, :, :] for mlp in self.key_creators[layer]], axis=1)
             for layer in range(self.attn_layers)
         ]
         values_all = [
-            torch.cat([mlp(merged_input)[:, :, :, None, :] for mlp in self.value_creators[layer]], axis=3)
+            torch.cat([mlp(merged_input)[:, None, :, :] for mlp in self.value_creators[layer]], axis=1)
             for layer in range(self.attn_layers)
         ]
 
         while time_horizon.has_missing_points():
-            mid_point_map = time_horizon.next_time_steps_to_sample()
-            mid_points_index = tuple(mid_point_map.keys())
-            num_mid_points = len(mid_points_index)
+            # index mask: Some points may not depends on all the values in the neighborhood, e.g. End points can only have one neighbor
+            mid_point_map, index_mask = time_horizon.next_to_fill()
+            print(mid_point_map)
+            # [num_series, num_mid_points]
+            pred_index_matrix = np.fromiter(mid_point_map.keys(), dtype=int).reshape(-1, num_series).T
+            num_pred_points = len(pred_index_matrix[0])
 
             for i in range(num_series):
-                current_pred_encoded = encoded[:, i, mid_points_index, :].reshape(num_batches, num_mid_points, self.input_dim)
-                # [batch, num_mid_points, attn_heads*attn_dim]
+                current_points_index = pred_index_matrix[i]
+                current_pred_encoded = encoded[:, current_points_index, :].reshape(num_batch, num_pred_points, self.input_dim)
+                # [batch, num_pred_points, attn_heads*attn_dim]
                 att_value = self.dimension_shift(current_pred_encoded)
 
                 for layer in range(self.attn_layers):
-                    # att_value: [batch, num_mid_points, attn_heads, attn_dim]
-                    # iterate over series make it one-dimensional
+                    # att_value: [batch, num_pred_points, attn_heads, attn_dim]
                     att_value_heads = att_value.reshape(
-                        num_batches, num_mid_points, self.attn_heads, self.attn_dim
+                        num_batch, num_pred_points, self.attn_heads, self.attn_dim
                     )
-                    # [batch, series, time_steps, attn_heads, attn_dim]
-                    keys_hist = keys_all[layer]
-                    # keys_hist = torch.cat((keys_hist[:, i, :, :, :], ), axis=2)
-                    values_hist = values_all[layer]
+                    # [batch, attn_heads, variable, attn_dim]
+                    keys = keys_all[layer]
+                    values = values_all[layer]
 
-                    # [batch, num_mid_points, series, 2-neighbor, attn_head, attn_dim]
-                    neighbor_keys_hist = torch.empty((num_batches, num_mid_points, num_series, 2, self.attn_heads, self.attn_dim), device=device)
-                    neighbor_values_hist = torch.empty((num_batches, num_mid_points, num_series, 2, self.attn_heads, self.attn_dim), device=device)
-                    for mid, (left, right) in enumerate(mid_point_map.values()):
-                        neighbor_keys_hist[:, mid, :, :, :, :] = torch.cat((
-                                                            keys_hist[:, :, left:left+1, :, :],
-                                                            torch.cat((keys_hist[:, :i, mid:mid+1, :, :], keys_hist[:, i:, right:right+1, :, :]), axis=1)
-                                                            ), 
-                                                            axis=2)
-                        neighbor_values_hist[:, mid, :, :, :, :] = torch.cat((
-                                                            values_hist[:, :, left:left+1, :, :],
-                                                            torch.cat((values_hist[:, :i, mid:mid+1, :, :], values_hist[:, i:, right:right+1, :, :]), axis=1)
-                                                            ), 
-                                                            axis=2)
-                    # neighbor_keys_hist = torch.cat([rearrange(keys_hist[:, :, neighbors, :, :], "batch series nbr head dim -> batch 1 head series nbr dim") 
-                    #                                 for neighbors in mid_point_map.values()], axis=1)
-                    # neighbor_values_hist = torch.cat([rearrange(values_hist[:, :, neighbors, :, :], "batch series nbr head dim -> batch 1 head series nbr dim") 
-                    #                                 for neighbors in mid_point_map.values()], axis=1)
-                    product_hist = torch.einsum("bmhd, bmsnhd -> bmhsn", att_value_heads, neighbor_keys_hist)
+                    # [batch, num_pred_points, attn_head, 2 * series, attn_dim]
+                    neighbor_keys = torch.empty((num_batch, num_pred_points, self.attn_heads, 2 * num_series, self.attn_dim), device=device)
+                    neighbor_values = torch.empty((num_batch, num_pred_points, self.attn_heads, 2 * num_series, self.attn_dim), device=device)
+                    for j, current_point in enumerate(current_points_index):
+                        # print(index_mask[index_mask])
+                        neighbor_index = mid_point_map[current_point]
+                        padding_mask = rearrange(index_mask[current_point], "n-> 1 1 n 1").to(device)
+                        neighbor_keys[:, j, :, :, :] = keys[:, :, neighbor_index, :] * padding_mask
+                        neighbor_values[:, j, :, :, :] = values[:, :, neighbor_index, :] * padding_mask
+
+                    product_hist = torch.einsum("bphd, bphnd -> bphn", att_value_heads, neighbor_keys)
                     product_hist = self.attn_dim ** (-0.5) * product_hist
 
+                    print(f"{product_hist=}")
                     weights = F.softmax(product_hist, dim=-1)
-                    att = torch.einsum("bmhsn, bmsnhd -> bmhd", weights, neighbor_values_hist)
-                    att = rearrange(att, "batch mid_points head dim -> batch mid_points (head dim)")
+                    print(f"{weights=}")
+                    att = torch.einsum("bphn, bphnd -> bphd", weights, neighbor_values)
+                    print(f"{att=}")
+                    att = rearrange(att, "batch pred head dim -> batch pred (head dim)")
                     att = self.attention_dropouts[layer](att)
+                    # residual
                     att_value = att_value + att
 
                     # pre dropout
                     att_value = self.attention_layer_norms[layer](att_value)
                     att_feed_forward = self.feed_forwards[layer](att_value)
-                    # residual connection
+                    # residual
                     att_value = att_value + att_feed_forward
                     att_value = self.feed_forward_layer_norms[layer](att_value)
 
                 # Get the output distribution parameters
-                logits = self.dist_extractors(att_value).reshape(num_batches * num_mid_points, self.resolution)
+                logits = self.dist_extractors(att_value).reshape(num_batch * num_pred_points, self.resolution)
                 # Select a single variable in {0, 1, 2, ..., self.resolution-1} according to the probabilities from the softmax
                 current_samples = torch.multinomial(input=torch.softmax(logits, dim=1), num_samples=1)
                 # Each point in the same bucket is equiprobable, and we used a floor function in the training
                 current_samples = current_samples + torch.rand_like(current_samples, device=device, dtype=torch.float32)
                 # Normalize to a variable in the [0, 1) range
                 current_samples /= self.resolution
-                current_samples = current_samples.reshape(num_batches, num_mid_points)
-                true_u[:, i, mid_points_index] = current_samples
+                current_samples = current_samples.reshape(num_batch, num_pred_points)
+                true_u[:, current_points_index] = current_samples
 
                 # Compute the key and value associated with the newly sampled variable, for the attention of the next ones.
-                # [batch, num_mid_points, embedding_dim+1]
+                # [batch, num_pred_points, embedding_dim+1]
                 key_value_input = torch.cat([current_pred_encoded, current_samples[:, :, None]], axis=-1)
 
                 for layer in range(self.attn_layers):
-                    keys_all[layer][:, i, mid_points_index, :, :] = torch.cat([mlp(key_value_input)[:, :, None, :] for mlp in self.key_creators[layer]], axis=2)
-                    values_all[layer][:, i, mid_points_index, :, :] = torch.cat([mlp(key_value_input)[:, :, None, :] for mlp in self.value_creators[layer]], axis=2)
-            print(f"Filled time steps {mid_points_index}")
+                    keys_all[layer][:, :, current_points_index, :] = torch.cat([mlp(key_value_input)[:, None, :, :] for mlp in self.key_creators[layer]], axis=1)
+                    values_all[layer][:, :, current_points_index, :] = torch.cat([mlp(key_value_input)[:, None, :, :] for mlp in self.value_creators[layer]], axis=1)
+            print(f"Filled time steps {pred_index_matrix[0]}")
 
-        return true_u
+        return true_u.reshape(num_batch, num_series, num_time_steps)

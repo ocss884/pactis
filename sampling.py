@@ -50,24 +50,35 @@ class TimeSeriesOM:
         if 0 in self.nearst_observation_map:
             first = self.nearst_observation_map[0][0]
             for n, i in enumerate(np.arange(0, self.variables, self.num_time_steps)):
-                if n == 0:
-                    mid_point_map[i] = np.arange(
-                        first, self.variables, self.num_time_steps)
-                else:
-                    mid_point_map[i] = np.concatenate((np.arange(0, n*self.num_time_steps, self.num_time_steps),
+                ls = np.zeros(2*self.num_series, dtype=int)
+                ls[:self.num_series] = np.arange(first, self.variables, self.num_time_steps) if n == 0 else \
+                                       np.concatenate((np.arange(0, n*self.num_time_steps, self.num_time_steps),
                                                        np.arange(first+n*self.num_time_steps, self.variables, self.num_time_steps)))
+                mid_point_map[i] = ls
+                # if n == 0:
+                #     mid_point_map[i] = ls
+                # else:
+                #     mid_point_map[i] = np.concatenate((np.arange(0, n*self.num_time_steps, self.num_time_steps),
+                #                                        np.arange(first+n*self.num_time_steps, self.variables, self.num_time_steps)))
+
             self.current_mask[0] = 1
             self.nearst_observation_map.pop(0)
 
         if self.num_time_steps-1 in self.nearst_observation_map:
             last = self.nearst_observation_map[self.num_time_steps-1][0]
             for n, i in enumerate(np.arange(self.num_time_steps-1, self.variables, self.num_time_steps)):
-                if n == 0:
-                    mid_point_map[i] = np.arange(
-                        last, self.variables, self.num_time_steps)
-                else:
-                    mid_point_map[i] = np.concatenate((np.arange(self.num_time_steps-1, n*self.num_time_steps, self.num_time_steps),
+                # if n == 0:
+                #     mid_point_map[i] = np.arange(
+                #         last, self.variables, self.num_time_steps)
+                # else:
+                #     mid_point_map[i] = np.concatenate((np.arange(self.num_time_steps-1, n*self.num_time_steps, self.num_time_steps),
+                #                                        np.arange(last + n*self.num_time_steps, self.variables, self.num_time_steps)))
+
+                ls = np.zeros(2*self.num_series, dtype=int)
+                ls[:self.num_series] = np.arange(last, self.variables, self.num_time_steps) if n == 0 else \
+                                       np.concatenate((np.arange(self.num_time_steps-1, n*self.num_time_steps, self.num_time_steps),
                                                        np.arange(last + n*self.num_time_steps, self.variables, self.num_time_steps)))
+                mid_point_map[i] = ls
 
             self.current_mask[-1] = 1
             self.nearst_observation_map.pop(self.num_time_steps-1)
@@ -114,7 +125,7 @@ class TimeSeriesOM:
 
     def find_all_missing(self) -> Dict[int, Dict[str, int]]:
         # O(n)
-        # The return dictionary behaves as two ends are observed even they are not. Since we're always going to 
+        # The return dictionary behaves as two ends are observed even they are not. Since we're always going to
         # check & fill the end points first, it doesn't matter.
         nearest_observation_map = {}
 
@@ -139,7 +150,7 @@ class TimeSeriesOM:
         # {missing point index: [id_left, id_right]}
         # contains all missing points index with their nearest left and right observations (value=1)
         # assume we have two ends observed
-        for idx, value in enumerate(self.current_mask):
+        for idx, value in enumerate(self.current_mask): 
             if value == 1:
                 if idx-left_pivot > 1:
                     # there are missing points between left_pivot and idx
@@ -149,14 +160,16 @@ class TimeSeriesOM:
                 left_pivot = idx
         return nearest_observation_map
 
-    def next_time_steps_to_sample(self) -> Dict[int, Dict[str, int]]:
+    def next_to_fill(self) -> Dict[int, Dict[str, int]]:
         r"""
         Return the current mid points and update the current map
         Iterate over Missing PoinTs but not the entire series to reduce the time complexity
         """
         # print(self._nearst_observation_map)
         if self._has_ends_missing():
-            return self._fill_missing_end_points()
+            mid_points_map = self._fill_missing_end_points()
+            index_mask = dict.fromkeys(mid_points_map.keys(), torch.Tensor([1]*self.num_series + [float("-inf")]*self.num_series))
+            return mid_points_map, index_mask
 
         first_idx = next(iter(self._nearst_observation_map))
         left_mpt = first_idx
@@ -173,16 +186,20 @@ class TimeSeriesOM:
 
         self._update_once(left_mpt, last_mpt, map_copy, mid_points_map)
         self._nearst_observation_map = map_copy
-        return mid_points_map
+
+        index_mask = dict.fromkeys(mid_points_map.keys(), torch.Tensor([1]*(self.num_series*2)))
+        return mid_points_map, index_mask
 
 
 if __name__ == "__main__":
     # print(TimeSeriesOM.__doc__)
     mask = [0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0]
     seq = TimeSeriesOM(3, mask)
-    # print(seq.nearst_observation_map)
+    hist = {}
     while seq.has_missing_points():
         print(seq.current_mask, "\n")
-        print(seq.next_time_steps_to_sample())
+        mid_points, index_mask = seq.next_to_fill()
+        print(mid_points, "\n")
+        print(index_mask, "\n")
         # print(seq.current_mask, "\n")
-    print(f"{seq._ori_mask = }")
+    print(hist)

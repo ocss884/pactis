@@ -179,6 +179,8 @@ class PACTiS(nn.Module):
                  data_normalization: str = "standardization",
                  positional_encoding = None,
                  ):
+        assert encoder.embedding_dim == decoder.input_dim, f"PACTiS: encoder input dim has {encoder.input_adapter.num_input_dim} input dimensions, but decoder has {decoder.input_dim} input dimensions."
+
         super().__init__()
 
         self.encoder = encoder
@@ -204,9 +206,8 @@ class PACTiS(nn.Module):
             self.time_encoding = PositionalEncoding(encoder.embedding_dim, **positional_encoding)
             
     def loss(self, value, mask: torch.Tensor):
-        num_batches = value.shape[0]
-        num_series = value.shape[1]
-        num_time_steps = value.shape[2]
+        num_batches, num_series, num_time_steps = value.shape
+
         hist_value = value[:, :, mask]
         pred_value = value[:, :, ~mask]
         device = value.device
@@ -242,6 +243,7 @@ class PACTiS(nn.Module):
         loss = self.decoder.loss(encoded, value, mask)
 
         return loss.mean()/num_series
+    
     def sample(self, value, mask):
         num_batches = value.shape[0]
         num_series = value.shape[1]
@@ -272,11 +274,3 @@ class PACTiS(nn.Module):
         samples = self.decoder.sample(encoded, value, mask)
 
         return samples
-
-class cls:
-    def __init__(self, a: nn.Module):
-        pass
-class mlt(nn.Module):
-    def __init__(self, a: nn.Module):
-        pass
-A = cls(mlt)

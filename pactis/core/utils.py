@@ -60,7 +60,8 @@ class TimeSeriesOM:
         # if torch.is_tensor(mask):
         #     self._mask = torch.clone(mask)
         # else:
-        self._mask = torch.as_tensor(mask)
+        
+        self._mask = mask.clone() if isinstance(mask, torch.Tensor) else torch.as_tensor(mask)
         self._ori_mask = mask
         self._nearst_observation_map = OrderedDict()
 
@@ -161,7 +162,7 @@ class TimeSeriesOM:
         return mid_points_map
 
     def has_missing_points(self) -> bool:
-        return (0 in self.current_mask)
+        return 0 in self.current_mask
 
     def find_all_missing(self) -> Dict[int, Dict[str, int]]:
         # O(n)
@@ -208,8 +209,8 @@ class TimeSeriesOM:
         # print(self._nearst_observation_map)
         if self._has_ends_missing():
             mid_points_map = self._fill_missing_end_points()
-            index_mask = dict.fromkeys(mid_points_map.keys(), torch.as_tensor([1]*self.num_series + [0]*self.num_series, dtype=bool))
-            return mid_points_map, index_mask
+            # index_mask = dict.fromkeys(mid_points_map.keys(), torch.as_tensor([1]*self.num_series + [0]*self.num_series, dtype=bool))
+            return mid_points_map
 
         first_idx = next(iter(self._nearst_observation_map))
         left_mpt = first_idx
@@ -227,18 +228,21 @@ class TimeSeriesOM:
         self._update_once(left_mpt, last_mpt, map_copy, mid_points_map)
         self._nearst_observation_map = map_copy
 
-        index_mask = dict.fromkeys(mid_points_map.keys(), torch.as_tensor([1]*(self.num_series*2)))
-        return mid_points_map, index_mask
+        # index_mask = dict.fromkeys(mid_points_map.keys(), torch.as_tensor([1]*(self.num_series*2)))
+        return mid_points_map
 
 # if __name__ == "__main__":
-#     print(TimeSeriesOM.__doc__)
-#     mask = [0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0] #14
+#     # print(TimeSeriesOM.__doc__)
+#     mask = [0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 0] #14
 #     seq = TimeSeriesOM(3, mask)
 #     mid_points_map = {}
 #     index_mask = {}
 #     while seq.has_missing_points():
-#         print(seq.current_mask, "\n")
+#         # print(seq.current_mask, "\n")
 #         current_mid_points_map, current_index_mask = seq.next_to_fill()
 #         mid_points_map, index_mask= {**mid_points_map, **current_mid_points_map}, {**index_mask, **current_index_mask}
-#     print(mask)
+#         print(mid_points_map)
+#         print(np.asarray(list(current_mid_points_map.values())).reshape(-1, 3, 6).transpose(1, 0, 2).shape)
+#         print("-------")
+
 

@@ -12,9 +12,8 @@ class Config:
     def from_config(cls):
         raise NotImplementedError
 
-@dataclass
+@dataclass(kw_only=True)
 class GeneralArgs:
-    _: KW_ONLY
     dropout: float = 0.0
     batch_first: bool = True
     # norm_first: bool = True
@@ -51,11 +50,12 @@ class SelfAttentionBlockConfig(SelfAttentionLayerConfig):
 @dataclass
 class PerceiverEncoderConfig(Config):
     input_adapter: InputAdapter
+
     num_latents: int
     num_latent_dim: int
     init_scale: float = 0.02
 
-    num_cross_attn_heads: int = 4
+    num_cross_attn_heads: int = None
     num_cross_attn_qk_dim: Optional[int] = None
     num_cross_attn_v_dim: Optional[int] = None
     first_cross_attn_layer_shared: bool = False
@@ -87,7 +87,7 @@ class PerceiverEncoderConfig(Config):
         return CrossAttentionLayerConfig(
             num_heads = self.num_cross_attn_heads,
             num_q_input_dim = self.num_latent_dim,
-            num_kv_input_dim = self.input_adapter.num_latent_dim,
+            num_kv_input_dim = self.input_adapter.num_input_dim,
             num_qk_dim = self.num_cross_attn_qk_dim,
             num_v_dim = self.num_cross_attn_v_dim,
             widening_factor = self.cross_attn_widening_factor,
@@ -118,6 +118,9 @@ class PerceiverEncoderConfig(Config):
                            num_cross_attn_layers: int = 1,
                            num_self_attn_blocks: int = 1,
                            ):
+        assert input_adapter.num_input_dim == cross_attn_config.num_kv_input_dim, f"input dim {input_adapter.num_input_dim} should match cross attn key&value input dim {cross_attn_config.num_kv_input_dim}"
+        assert latent_query_config.num_latent_dim == cross_attn_config.num_q_input_dim, f"latent dim {latent_query_config.num_latent_dim} should match cross attn query input dim {cross_attn_config.num_q_input_dim}"
+
         return cls(
             input_adapter = input_adapter,
 

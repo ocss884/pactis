@@ -50,7 +50,10 @@ def log_sigmoid(x):
     Substract the epsilon to avoid 0 as a possible value for large x.
     """
     return -nn.functional.softplus(-x) - EPSILON
-
+def act_a(x):
+    return nn.functional.softplus(x) + EPSILON
+def id(x):
+    return x
 
 class SigmoidFlow(nn.Module):
     # Indices:
@@ -78,10 +81,13 @@ class SigmoidFlow(nn.Module):
         self.hidden_dim = hidden_dim
         self.no_logit = no_logit
 
-        self.act_a = lambda x: nn.functional.softplus(x) + EPSILON
-        self.act_b = lambda x: x
-        self.act_w = lambda x: nn.functional.softmax(x, dim=-1)
-
+        ### rm lambda function
+        # self.act_a = lambda x: nn.functional.softplus(x) + EPSILON
+        # self.act_b = lambda x: x
+        # self.act_w = lambda x: nn.functional.softmax(x, dim=-1)
+        self.act_a = act_a
+        self.act_b = id
+        self.act_w = nn.Softmax(dim=-1)
     def forward(self, params, x, logdet):
         """
         Transform the given value according to the given parameters,

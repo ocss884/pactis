@@ -7,6 +7,7 @@ from .utils import _easy_mlp, TimeSeriesOM
 from .marginal import DSFMarginal
 from typing import Sequence
 
+
 class CopulaDecoder(nn.Module):
     """
     A decoder which forecast using a distribution built from a copula and marginal distributions.
@@ -18,8 +19,8 @@ class CopulaDecoder(nn.Module):
         min_u: float = 0.0,
         max_u: float = 1.0,
         skip_sampling_marginal: bool = False,
-        attentional_copula =  None,
-        dsf_marginal =  None,
+        attentional_copula=None,
+        dsf_marginal=None,
     ):
         """
         Parameters:
@@ -44,17 +45,21 @@ class CopulaDecoder(nn.Module):
         """
         super().__init__()
 
-        assert (dsf_marginal is not None) == 1, "Must select exactly one type of marginal"
+        assert dsf_marginal is not None, "Must select exactly one type of marginal"
 
         self.min_u = min_u
         self.max_u = max_u
+        self.input_dim = input_dim
+        
         self.skip_sampling_marginal = skip_sampling_marginal
 
         if attentional_copula is not None:
-            self.copula = AttentionalCopula(input_dim=input_dim, **attentional_copula)
+            self.copula = AttentionalCopula(
+                input_dim=input_dim, **attentional_copula)
 
-        if dsf_marginal is not None:
-            self.marginal = DSFMarginal(context_dim=input_dim, **dsf_marginal).to("cuda")
+        # if dsf_marginal is not None:
+        self.marginal = DSFMarginal(
+            context_dim=input_dim, **dsf_marginal).to("cuda")
 
     def loss(self, encoded: torch.Tensor, true_value: torch.Tensor, mask: Sequence) -> torch.Tensor:
         """
@@ -65,12 +70,14 @@ class CopulaDecoder(nn.Module):
         encoded: Tensor [batch, series, time steps, embedding dimension]
             A tensor containing an embedding for each variable and time step.
             This embedding is coming from the encoder, so contains shared information across series and time steps.
-        mask: BoolTensor [batch, series, time steps]
-            A tensor containing a mask indicating whether a given value was available for the encoder.
-            The decoder only forecasts values for which the mask is set to False.
+
         true_value: Tensor [batch, series, time steps]
             A tensor containing the true value for the values to be forecasted.
             Only the values where the mask is set to False will be considered in the loss function.
+
+        mask: BoolTensor [batch, series, time steps]
+            A tensor containing a mask indicating whether a given value was available for the encoder.
+            The decoder only forecasts values for which the mask is set to False.
 
         Returns:
         --------
@@ -80,24 +87,28 @@ class CopulaDecoder(nn.Module):
 
         # Assume that the mask is constant inside the batch
         device = encoded.device
-        mask = torch.Tensor(mask).bool().to(device)
+        mask = torch.as_tensor(mask, dtype=bool)
 
         hist_encoded = encoded[:, :, mask, :]
         pred_encoded = encoded[:, :, ~mask, :]
         hist_true_x = true_value[:, :, mask]
         pred_true_x = true_value[:, :, ~mask]
         # Transform to [0,1] using the marginals
-        hist_true_u = self.marginal.forward_no_logdet(hist_encoded, hist_true_x)
-        pred_true_u, marginal_logdet = self.marginal.forward_logdet(pred_encoded, pred_true_x)
+        hist_true_u = self.marginal.forward_no_logdet(
+            hist_encoded, hist_true_x)
+        pred_true_u, marginal_logdet = self.marginal.forward_logdet(
+            pred_encoded, pred_true_x)
 
         true_u = torch.empty_like(true_value, device=device)
         true_u[:, :, mask] = hist_true_u
         true_u[:, :, ~mask] = pred_true_u
+
+        mask = mask.to(device)
         copula_loss = self.copula.loss(
             encoded=encoded,
             mask=mask,
             true_u=true_u,
-            device=encoded.device
+            device=device
         )
 
         # Loss = negative log likelihood
@@ -111,15 +122,18 @@ class CopulaDecoder(nn.Module):
         -----------
         num_samples: int
             How many samples to generate, must be >= 1.
+
         encoded: Tensor [batch, series, time steps, embedding dimension]
             A tensor containing an embedding for each variable and time step.
             This embedding is coming from the encoder, so contains shared information across series and time steps.
-        mask: BoolTensor [batch, series, time steps]
-            A tensor containing a mask indicating whether a given value is masked (available) for the encoder.
-            The decoder only forecasts values for which the mask is set to False.
+
         true_value: Tensor [batch, series, time steps]
             A tensor containing the true value for the values to be forecasted.
             The values where the mask is set to True will be copied as-is in the output.
+
+        mask: BoolTensor [batch, series, time steps]
+            A tensor containing a mask indicating whether a given value is masked (available) for the encoder.
+            The decoder only forecasts values for which the mask is set to False.
 
         Returns:
         --------
@@ -127,12 +141,10 @@ class CopulaDecoder(nn.Module):
             Samples drawn from the forecasted distribution.
         """
         device = encoded.device
-        mask = torch.Tensor(mask).bool().to(device)
+        mask = torch.as_tensor(mask).bool().to(device)
 
-        num_batch = encoded.shape[0]
-        num_series = encoded.shape[1]
-        num_time_steps = encoded.shape[2]
-        num_input_dim = encoded.shape[-1]
+        num_batch, num_series, _, num_input_dim = encoded.shape
+
         # Transform to [0,1] using the marginals
         true_u = self.marginal.forward_no_logdet(encoded, true_value)
 
@@ -145,10 +157,10 @@ class CopulaDecoder(nn.Module):
         pred_encoded = encoded[:, :, ~mask, :]
         pred_samples = all_samples[:, :, ~mask]
 
-        print(pred_samples.shape, pred_encoded.shape)
         if not self.skip_sampling_marginal:
             # Transform away from [0,1] using the marginals
-            pred_samples = self.min_u + (self.max_u - self.min_u) * pred_samples
+            pred_samples = self.min_u + \
+                (self.max_u - self.min_u) * pred_samples
 
             pred_samples = self.marginal.inverse(
                 pred_encoded.reshape(num_batch, -1, num_input_dim),
@@ -161,11 +173,13 @@ class CopulaDecoder(nn.Module):
         samples[:, :, ~mask] = pred_samples.reshape(num_batch, num_series, -1)
 
         return samples
-        
+
+
 class AttentionalCopula(nn.Module):
     r"""
-    
+
     """
+
     def __init__(self, input_dim, attn_heads, attn_dim, attn_layers, mlp_dim, mlp_layers, resolution,
                  dropout: float = .1):
         super().__init__()
@@ -179,7 +193,8 @@ class AttentionalCopula(nn.Module):
         self.resolution = resolution
         self.dropout = dropout
 
-        self.dimension_shift = nn.Linear(self.input_dim, self.attn_heads*self.attn_dim)
+        self.dimension_shift = nn.Linear(
+            self.input_dim, self.attn_heads*self.attn_dim)
         self.dist_extractors = _easy_mlp(
             input_dim=self.attn_heads * self.attn_dim,
             hidden_dim=self.mlp_dim,
@@ -222,27 +237,31 @@ class AttentionalCopula(nn.Module):
                 for _ in range(self.attn_layers)
             ]
         )
-        self.attention_dropouts = nn.ModuleList([nn.Dropout(self.dropout) for _ in range(self.attn_layers)])
+        self.attention_dropouts = nn.ModuleList(
+            [nn.Dropout(self.dropout) for _ in range(self.attn_layers)])
         self.attention_layer_norms = nn.ModuleList(
-            [nn.LayerNorm(self.attn_heads * self.attn_dim) for _ in range(self.attn_layers)]
+            [nn.LayerNorm(self.attn_heads * self.attn_dim)
+             for _ in range(self.attn_layers)]
         )
         self.feed_forwards = nn.ModuleList(
             [
                 nn.Sequential(
-                    nn.Linear(self.attn_heads * self.attn_dim, self.attn_heads * self.attn_dim),
+                    nn.Linear(self.attn_heads * self.attn_dim,
+                              self.attn_heads * self.attn_dim),
                     nn.ReLU(),
                     nn.Dropout(self.dropout),
-                    nn.Linear(self.attn_heads * self.attn_dim, self.attn_heads * self.attn_dim),
+                    nn.Linear(self.attn_heads * self.attn_dim,
+                              self.attn_heads * self.attn_dim),
                     nn.Dropout(dropout),
                 )
                 for _ in range(self.attn_layers)
             ]
         )
         self.feed_forward_layer_norms = nn.ModuleList(
-            [nn.LayerNorm(self.attn_heads * self.attn_dim) for _ in range(self.attn_layers)]
+            [nn.LayerNorm(self.attn_heads * self.attn_dim)
+             for _ in range(self.attn_layers)]
         )
 
-        
     def loss(self, encoded, true_u, mask, device=None):
         r"""
         Args:
@@ -254,36 +273,48 @@ class AttentionalCopula(nn.Module):
 
         num_batch, num_series, num_time_steps, _ = encoded.shape
         num_variable = num_series * num_time_steps
-        
+
         time_horizon = TimeSeriesOM(num_series, mask)
         mid_points_map = {}
         index_mask = {}
         while time_horizon.has_missing_points():
             current_mid_points_map, current_index_mask = time_horizon.next_to_fill()
-            mid_points_map, index_mask= {**mid_points_map, **current_mid_points_map}, {**index_mask, **current_index_mask}
+            mid_points_map, index_mask = {
+                **mid_points_map, **current_mid_points_map}, {**index_mask, **current_index_mask}
         num_pred_points = len(mid_points_map)
 
-        
-        encoded  = encoded.reshape(num_batch, num_variable, self.input_dim)
+        encoded = encoded.reshape(num_batch, num_variable, self.input_dim)
         true_u = true_u.reshape(num_batch, num_variable, 1)
         merged_input = torch.cat([encoded, true_u], dim=-1)
 
-        # [[batch, attn_heads, variable, attn_dim]*attn_layers] for history and prediction variable, concat along the attn_heads dimension
+        # [[batch, attn_heads, variable, attn_dim]*attn_layers] for history and prediction variable, concat along the variable dimension
         keys_all = [
-            torch.cat([mlp(merged_input)[:, None, :, :] for mlp in self.key_creators[layer]], axis=1)
+            torch.cat([mlp(merged_input)[:, None, :, :]
+                      for mlp in self.key_creators[layer]], axis=1)
             for layer in range(self.attn_layers)
         ]
         values_all = [
-            torch.cat([mlp(merged_input)[:, None, :, :] for mlp in self.value_creators[layer]], axis=1)
+            torch.cat([mlp(merged_input)[:, None, :, :]
+                      for mlp in self.value_creators[layer]], axis=1)
             for layer in range(self.attn_layers)
         ]
+
         pred_points = tuple(mid_points_map.keys())
+        # [batch, num_pred_points, 2*num_series (neighbor), attn_dim]
         current_encoded = encoded[:, pred_points, :]
-        # [batch, attn_heads, num_pred_points, attn_dim]
 
         neighbor_index = np.asarray(list(mid_points_map.values()))
-        att_value = self.dimension_shift(current_encoded)
 
+        # inf mask
+        attn_mask = torch.zeros((num_batch, num_pred_points, self.attn_heads, 2 * num_series), device=device)
+        num_missing_ends = 0
+        if 0 in mid_points_map:
+            num_missing_ends += 1
+        if (num_time_steps - 1) in mid_points_map:
+            num_missing_ends += 1
+        attn_mask[:, 0:num_missing_ends*num_series, num_series:] = float("inf")
+
+        att_value = self.dimension_shift(current_encoded)
 
         for layer in range(self.attn_layers):
             # att_value: [batch, num_pred_points, attn_heads, attn_dim]
@@ -303,12 +334,13 @@ class AttentionalCopula(nn.Module):
             #     neighbor_values[:, j, :, :, :] = values[:, :, neighbor_index, :] * padding_mask
             neighbor_keys = keys_all[layer][:, :, neighbor_index, :]
             neighbor_values = values_all[layer][:, :, neighbor_index, :]
-
             product_hist = torch.einsum("bphd, bhpnd -> bphn", att_value_heads, neighbor_keys)
-            product_hist = self.attn_dim ** (-0.5) * product_hist
 
+            product_hist = product_hist - attn_mask
+            product_hist = self.attn_dim ** (-0.5) * product_hist
             weights = F.softmax(product_hist, dim=-1)
             att = torch.einsum("bphn, bhpnd -> bphd", weights, neighbor_values)
+
             att = rearrange(att, "batch pred head dim -> batch pred (head dim)")
             att = self.attention_dropouts[layer](att)
             # residual
@@ -329,10 +361,9 @@ class AttentionalCopula(nn.Module):
 
         # batch
         return -logprob.sum((1, 2))
-    
 
     def sample_once(self, hist_encoded, true_u, pred_encoded):
-        ### for sampling end
+        # for sampling end
         r"""
         hist_encoded: [batch, series, time_steps, embedding_dim]
             Tensor containing embedding of history data points
@@ -343,7 +374,7 @@ class AttentionalCopula(nn.Module):
         hist_encoded = torch.clone(hist_encoded)
         true_u = torch.clone(true_u)
         pred_encoded = torch.clone(pred_encoded)
-        
+
         num_batches = hist_encoded.shape[0]
         num_series = hist_encoded.shape[1]
 
@@ -358,7 +389,7 @@ class AttentionalCopula(nn.Module):
         ]
         for i in range(num_series):
             att_value = self.dimension_shift(pred_encoded[:, i, :, :])
-        
+
     def sample(self, encoded, true_u, mask, device=None):
         r"""
         encoded: [batch, series, time_steps, embedding_dim]
@@ -368,15 +399,15 @@ class AttentionalCopula(nn.Module):
         mask: [time_steps]
             1 for history, 0 for prediction
         """
-        
-        num_batch = encoded.shape[0]
-        num_series = encoded.shape[1]
-        num_time_steps = encoded.shape[2]
+        if device is None:
+            device = encoded.device
+
+        num_batch, num_series, num_time_steps, _ = encoded.shape
         num_variable = num_series * num_time_steps
 
         time_horizon = TimeSeriesOM(num_series, mask)
-        encoded = torch.clone(encoded.reshape(num_batch, num_variable, self.input_dim)).to(device)
-        true_u = torch.clone(true_u.reshape(num_batch, num_variable)).to(device)
+        encoded = encoded.reshape(num_batch, num_variable, self.input_dim).clone().to(device)
+        true_u = true_u.reshape(num_batch, num_variable).clone().to(device)
 
         # [batch, variable, input_dim + 1]
         merged_input = torch.cat([encoded, true_u[:, :, None]], dim=-1)
@@ -393,14 +424,21 @@ class AttentionalCopula(nn.Module):
 
         while time_horizon.has_missing_points():
             # index mask: Some points may not depends on all the values in the neighborhood, e.g. End points can only have one neighbor
-            mid_point_map, index_mask = time_horizon.next_to_fill()
+            mid_point_map = time_horizon.next_to_fill()
             # [num_series, num_mid_points]
             pred_index_matrix = np.fromiter(mid_point_map.keys(), dtype=int).reshape(-1, num_series).T
             num_pred_points = len(pred_index_matrix[0])
 
+            attn_mask = torch.zeros((num_batch, num_pred_points, self.attn_heads, 2 * num_series), device=device)
+            if 0 in mid_point_map or (num_time_steps -1) in mid_point_map:
+                attn_mask[:, :, :, num_series:] = float("inf")
+
+            neighbor_index_matrix = np.asarray(list(mid_point_map.values())).reshape(-1, num_series, 2*num_series).transpose(1, 0, 2)
+                
             for i in range(num_series):
                 current_points_index = pred_index_matrix[i]
                 current_pred_encoded = encoded[:, current_points_index, :].reshape(num_batch, num_pred_points, self.input_dim)
+                neighbor_index = neighbor_index_matrix[i]
                 # [batch, num_pred_points, attn_heads*attn_dim]
                 att_value = self.dimension_shift(current_pred_encoded)
 
@@ -409,25 +447,17 @@ class AttentionalCopula(nn.Module):
                     att_value_heads = att_value.reshape(
                         num_batch, num_pred_points, self.attn_heads, self.attn_dim
                     )
-                    # [batch, attn_heads, variable, attn_dim]
-                    keys = keys_all[layer]
-                    values = values_all[layer]
 
-                    # [batch, num_pred_points, attn_head, 2 * series, attn_dim]
-                    neighbor_keys = torch.empty((num_batch, num_pred_points, self.attn_heads, 2 * num_series, self.attn_dim), device=device)
-                    neighbor_values = torch.empty((num_batch, num_pred_points, self.attn_heads, 2 * num_series, self.attn_dim), device=device)
-                    for j, current_point in enumerate(current_points_index):
-                        # print(index_mask[index_mask])
-                        neighbor_index = mid_point_map[current_point]
-                        padding_mask = rearrange(index_mask[current_point], "n-> 1 1 n 1").to(device)
-                        neighbor_keys[:, j, :, :, :] = keys[:, :, neighbor_index, :].to("cuda") * padding_mask
-                        neighbor_values[:, j, :, :, :] = values[:, :, neighbor_index, :] * padding_mask
+                    # [batch, attn_head, num_pred_points, 2 * series, attn_dim]
+                    neighbor_keys = keys_all[layer][:, :, neighbor_index, :]
+                    neighbor_values = values_all[layer][:, :, neighbor_index, :]
 
-                    product_hist = torch.einsum("bphd, bphnd -> bphn", att_value_heads, neighbor_keys)
+                    product_hist = torch.einsum("bphd, bhpnd -> bphn", att_value_heads, neighbor_keys)
                     product_hist = self.attn_dim ** (-0.5) * product_hist
+                    product_hist = product_hist - attn_mask
 
                     weights = F.softmax(product_hist, dim=-1)
-                    att = torch.einsum("bphn, bphnd -> bphd", weights, neighbor_values)
+                    att = torch.einsum("bphn, bhpnd -> bphd", weights, neighbor_values)
                     att = rearrange(att, "batch pred head dim -> batch pred (head dim)")
                     att = self.attention_dropouts[layer](att)
                     # residual
@@ -445,7 +475,8 @@ class AttentionalCopula(nn.Module):
                 # Select a single variable in {0, 1, 2, ..., self.resolution-1} according to the probabilities from the softmax
                 current_samples = torch.multinomial(input=torch.softmax(logits, dim=1), num_samples=1)
                 # Each point in the same bucket is equiprobable, and we used a floor function in the training
-                current_samples = current_samples + torch.rand_like(current_samples, device=device, dtype=torch.float32)
+                current_samples = current_samples + \
+                    torch.rand_like(current_samples, device=device, dtype=torch.float32)
                 # Normalize to a variable in the [0, 1) range
                 current_samples /= self.resolution
                 current_samples = current_samples.reshape(num_batch, num_pred_points)
@@ -455,9 +486,10 @@ class AttentionalCopula(nn.Module):
                 # [batch, num_pred_points, embedding_dim+1]
                 key_value_input = torch.cat([current_pred_encoded, current_samples[:, :, None]], axis=-1)
 
+                # update attention keys and values matrix
                 for layer in range(self.attn_layers):
                     keys_all[layer][:, :, current_points_index, :] = torch.cat([mlp(key_value_input)[:, None, :, :] for mlp in self.key_creators[layer]], axis=1)
                     values_all[layer][:, :, current_points_index, :] = torch.cat([mlp(key_value_input)[:, None, :, :] for mlp in self.value_creators[layer]], axis=1)
-            print(f"Filled time steps {pred_index_matrix[0]}")
+            # print(f"Filled time steps {pred_index_matrix[0]}")
 
         return true_u.reshape(num_batch, num_series, num_time_steps)

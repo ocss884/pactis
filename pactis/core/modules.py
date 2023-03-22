@@ -131,7 +131,7 @@ class MultiHeadAttention(nn.Module):
 
         if rot_pos_emb_k is not None:
             k = rot_pos_emb_k.rotate(k)
-
+        
         attn = torch.einsum("b h i c, b h j c -> b h i j", q, k)
         attn_max_neg = -torch.finfo(attn.dtype).max
         # attn_max_neg = float("-inf")
@@ -339,6 +339,7 @@ class CrossAttentionLayer(nn.Module):
         self.batch_first = batch_first
         self.norm_first = norm_first
 
+        self.num_kv_input_dim = num_kv_input_dim
         self.cross_attn = CrossAttention(num_heads, num_q_input_dim, num_kv_input_dim, num_qk_dim, num_v_dim,
                                             qkv_bias=qkv_bias, out_bias=out_bias, dropout=dropout, batch_first=batch_first)
         # self.mlp = Sequential(

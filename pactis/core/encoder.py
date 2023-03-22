@@ -44,6 +44,7 @@ class PerceiverEncoder(nn.Module, Base):
 
         batch_first: bool = True,
     ):
+        
         super().__init__()
 
         self.latent_provider = LatentQuery(num_latents, num_latent_dim, init_scale=init_scale)
@@ -78,15 +79,15 @@ class PerceiverEncoder(nn.Module, Base):
 
         def self_attn():
             return SelfAttentionBlock(
-                num_layers=num_self_attn_layers_per_block,
-                num_heads=num_self_attn_heads,
-                num_dim=num_latent_dim,
-                num_qk_dim=num_self_attn_qk_dim,
-                num_v_dim=num_self_attn_v_dim,
-                widening_factor=self_attn_widening_factor,
-                dropout=dropout,
-                batch_first=batch_first,
-                norm_first=self_attn_norm_first
+                num_layers = num_self_attn_layers_per_block,
+                num_heads = num_self_attn_heads,
+                num_dim = num_latent_dim,
+                num_qk_dim = num_self_attn_qk_dim,
+                num_v_dim = num_self_attn_v_dim,
+                widening_factor = self_attn_widening_factor,
+                dropout = dropout,
+                batch_first = batch_first,
+                norm_first = self_attn_norm_first
             )
 
         self.cross_attn_1 = cross_attn()
@@ -104,6 +105,9 @@ class PerceiverEncoder(nn.Module, Base):
     #     with torch.no_grad():
     #         init_parameters(self, init_scale)
 
+    @property
+    def embedding_dim(self):
+        return self.input_adapter.num_input_dim
     @property
     def extra_cross_attention_layer(self):
         return self.num_cross_attn_layers > 1 and not self.first_cross_attn_layer_shared
@@ -133,21 +137,22 @@ class PerceiverEncoder(nn.Module, Base):
             return x_latent
 
 class PerceiverDecoder(nn.Module, Base):
-    def __init__(self, 
-                num_latents: int,
-                num_latent_dim: int,
-                num_heads: int,
-                num_q_input_dim: int,
-                num_kv_input_dim: int,
-                num_qk_dim: int,
-                num_v_dim: int,
-                qkv_bias: bool = True,
-                out_bias: bool = True,
-                widening_factor: int = 1,
-                dropout: float = 0.0,
-                norm_first: bool = True,
-                batch_first: bool = True,
-                init_scale: float = 0.02
+    def __init__(
+            self, 
+            num_latents: int,
+            num_latent_dim: int,
+            num_heads: int,
+            num_q_input_dim: int,
+            num_kv_input_dim: int,
+            num_qk_dim: int,
+            num_v_dim: int,
+            qkv_bias: bool = True,
+            out_bias: bool = True,
+            widening_factor: int = 1,
+            dropout: float = 0.0,
+            norm_first: bool = True,
+            batch_first: bool = True,
+            init_scale: float = 0.02
     ):
         super().__init__()
         #[batch, seies*time steps, latent_dim]
@@ -188,9 +193,15 @@ class PerceiverDecoder(nn.Module, Base):
 
 class PerceiverIO(Sequential, Base):
     def __init__(self, encoder: PerceiverEncoder, decoder: PerceiverDecoder):
-        super().__init__(encoder, decoder)
-        self.embedding_dim = encoder.input_adapter.num_input_dim
+        assert encoder.embedding_dim == decoder.latent_provider.num_query_dim, f"Perceiver encoder input_dim ({self.embedding_dim}) not matching decoder latent_dim ({decoder.latent_provider.num_query_dim})"
+        assert encoder.latent_provider.num_query_dim == decoder.cross_attn.num_kv_input_dim, f"Perceiver encoder latent_dim ({encoder.latent_provider.num_query_dim}) not matching decoder cross_attn kv_input_dim ({decoder.cross_attn.num_kv_input_dim})"
 
+        super().__init__(encoder, decoder)
+
+    @property
+    def embedding_dim(self):
+        return self._modules["0"].embedding_dim
+    
     @classmethod
     def from_config(cls, encoder_config: PerceiverEncoderConfig, decoder_config: PerceiverDecoder, **kwargs):
         encoder = PerceiverEncoder.from_config(encoder_config, **kwargs)

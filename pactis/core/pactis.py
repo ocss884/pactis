@@ -231,22 +231,21 @@ class PACTiS(nn.Module):
 
         encoded = self.input_encoder(encoded)
         # if self.input_encoding_normalization:
-        encoded = encoded * self.encoder.embedding_dim**0.5
+        encoded *= self.encoder.embedding_dim**0.5
 
         if self.time_encoding:
             encoded = self.time_encoding(encoded, 
                                          torch.arange(num_time_steps, device=device).repeat(num_batches, num_series, 1))
         encoded = rearrange(encoded, "b s t d -> b (s t) d")
-
         encoded = self.encoder(encoded)
         encoded = rearrange(encoded, "b (s t) d -> b s t d", s=num_series)
+        
         loss = self.decoder.loss(encoded, value, mask)
 
         return loss.mean()/num_series
     
-    def sample(self, value, mask):
-        num_batches = value.shape[0]
-        num_series = value.shape[1]
+    def sample(self, value, mask, num_samples: int = 1):
+        num_batches,num_series, *_ = value.shape
         hist_value = value[:, :, mask]
         pred_value = value[:, :, ~mask]
         device = value.device
@@ -260,17 +259,24 @@ class PACTiS(nn.Module):
         value[:, :, ~mask] = pred_value
 
         encoded = torch.cat(
-        [
-            rearrange(value, "b s t -> b s t 1"),
-            series_emb[:, :, None, :].expand(-1, -1, value.shape[2], -1),
-            mask.float().repeat(num_batches, num_series, 1)[:, :, :, None],
-        ],
-        dim=3)
-
-        encoded = rearrange(encoded, "b s t d -> b (s t) d")
+            [
+                rearrange(value, "b s t -> b s t 1"),
+                series_emb[:, :, None, :].expand(-1, -1, value.shape[2], -1),
+                mask.float().repeat(num_batches, num_series, 1)[:, :, :, None],
+            ],
+        dim=3
+        )
+        # input_encoding_normalization
         encoded = self.input_encoder(encoded)
+        encoded *= self.encoder.embedding_dim**0.5
+        if self.time_encoding:
+            encoded = self.time_encoding(encoded, 
+                                         torch.arange(value.shape[2], device=device).repeat(num_batches, num_series, 1))
+        encoded = rearrange(encoded, "b s t d -> b (s t) d")
         encoded = self.encoder(encoded)
         encoded = rearrange(encoded, "b (s t) d -> b s t d", s=num_series)
-        samples = self.decoder.sample(encoded, value, mask)
+        samples = self.decoder.sample(encoded, value, mask, num_samples)
+        samples = rearrange(samples, "sample batch series time -> batch series time sample")
+        samples = normalizer.denormalize(samples)
 
         return samples

@@ -109,7 +109,6 @@ class PerceiverEncoderConfig(Config):
             # norm_first=self.self_attn_norm_first,
         )
     
-    
     @classmethod
     def create_from_config(cls, input_adapter: InputAdapter, 
                            latent_query_config: LatentQueryConfig, 

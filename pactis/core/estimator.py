@@ -176,7 +176,7 @@ class PACTiSEstimator(PyTorchEstimator):
         transformation: Transformation
             The transformation to apply to the data prior to being sent to the model.
         trained_network: nn.Module
-            An instance of TACTiSTrainingNetwork with trained parameters.
+            An instance of PACTiSTrainingNetwork with trained parameters.
         device: torch.device
             The device where the model parameters should be placed.
 
